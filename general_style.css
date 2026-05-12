@@ -1,0 +1,47 @@
+
+
+body 
+{
+    font-family: Arial;
+    /* Use 100% or dynamic viewport width to ignore scrollbar thickness */
+    height: 100%;
+    position: absolute;
+    left: 0;
+    top: 0;
+    
+    /* This prevents the layout from jumping when scrollbars appear/disappear */
+    /* scrollbar-gutter: stable both-edges;  */
+    
+    /* Ensures content doesn't bleed under the scrollbar */
+    overflow-x: hidden; 
+    display: grid; /* Best way to center accurately */
+    place-items: center;
+    align-items: center;
+    box-sizing: border-box;
+    overflow-x: hidden;
+}
+
+.main_cont
+{
+    position: relative;
+    height: max-content;
+    min-width: 480px;
+    padding: 10px;
+    border: 1px solid;
+    border-radius: 20px;
+    box-sizing: border-box;
+
+}
+
+@media screen and (max-width: 768px) 
+{
+
+    .main_cont 
+    {
+        min-width: 90vw;
+        width: 100%;
+        /* border: none; */
+    }
+
+    
+}
