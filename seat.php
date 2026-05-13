@@ -10,219 +10,154 @@ ini_set('display_errors', 1);
 | VALIDATE SESSION
 |--------------------------------------------------------------------------
 */
-
 if (!isset($_SESSION['event_name'])) {
-    die("No event selected. Please go back.");
+    die("No event selected.");
 }
 
-$eventName = $_SESSION['event_name'];
+$eventName = mysqli_real_escape_string($conn, $_SESSION['event_name']);
 
 /*
 |--------------------------------------------------------------------------
-| GET EVENT
+| GET EVENT FROM tickets
 |--------------------------------------------------------------------------
 */
+$eventQuery = mysqli_query(
+    $conn,
+    "SELECT t.*, v.venue_name
+     FROM tickets t
+     LEFT JOIN venues v ON v.id = t.venue_id
+     WHERE t.event_name = '$eventName'
+     LIMIT 1"
+);
 
-$eventSql = "
-    SELECT *
-    FROM tickets
-    WHERE event_name='$eventName'
-";
-$eventResult = mysqli_query($conn, $eventSql);
-
-if (!$eventResult || mysqli_num_rows($eventResult) == 0) {
-    die("Event not found in database.");
+if (!$eventQuery || mysqli_num_rows($eventQuery) == 0) {
+    die("Event not found.");
 }
 
-$eventData = mysqli_fetch_assoc($eventResult);
-
+$eventData = mysqli_fetch_assoc($eventQuery);
 $eventId = (int)$eventData['id'];
-$venueId = (int)$eventData['venue_id'];
 
 /*
 |--------------------------------------------------------------------------
-| GET VENUE
+| GET EVENT GROUPS
 |--------------------------------------------------------------------------
 */
+$groupsQuery = mysqli_query(
+    $conn,
+    "SELECT *
+     FROM event_seat_groups
+     WHERE event_id = '$eventId'
+     ORDER BY id ASC"
+);
 
-$venueSql = "
-    SELECT *
-    FROM venues
-    WHERE id='$venueId'
-";
-$venueResult = mysqli_query($conn, $venueSql);
-
-if (!$venueResult || mysqli_num_rows($venueResult) == 0) {
-    die("Venue not found.");
-}
-
-$venueData = mysqli_fetch_assoc($venueResult);
-
-/*
-|--------------------------------------------------------------------------
-| GET VENUE SEATS
-|--------------------------------------------------------------------------
-*/
-
-$seatSql = "
-    SELECT *
-    FROM venue_seats
-    WHERE venue_id='$venueId'
-    ORDER BY row_name, seat_number
-";
-$seatResult = mysqli_query($conn, $seatSql);
-
-if (!$seatResult) {
-    die("Seat query failed: " . mysqli_error($conn));
-}
-
-/*
-|--------------------------------------------------------------------------
-| GET ROW PRICES FOR THIS EVENT
-|--------------------------------------------------------------------------
-*/
-
-$rowPriceMap = [];
-
-$rowPriceSql = "
-    SELECT row_name, price
-    FROM event_row_prices
-    WHERE event_id='$eventId'
-";
-$rowPriceResult = mysqli_query($conn, $rowPriceSql);
-
-if ($rowPriceResult) {
-    while ($rp = mysqli_fetch_assoc($rowPriceResult)) {
-        $rowPriceMap[$rp['row_name']] = (float)$rp['price'];
-    }
+if (!$groupsQuery) {
+    die("Group query failed: " . mysqli_error($conn));
 }
 
 /*
 |--------------------------------------------------------------------------
 | GET TAKEN SEATS
 |--------------------------------------------------------------------------
+| booked seats are stored in event_group_seats.status = 'booked'
+|--------------------------------------------------------------------------
 */
-
 $takenSeats = [];
 
-$takenSql = "
-    SELECT seat_code
-    FROM bookings
-    WHERE event_id='$eventId'
-    AND booking_status IN ('reserved', 'paid')
-";
-$takenResult = mysqli_query($conn, $takenSql);
+$takenQuery = mysqli_query(
+    $conn,
+    "SELECT g.group_name, s.seat_number
+     FROM event_group_seats s
+     INNER JOIN event_seat_groups g ON g.id = s.group_id
+     WHERE g.event_id = '$eventId'
+     AND s.status = 'booked'"
+);
 
-if ($takenResult) {
-    while ($row = mysqli_fetch_assoc($takenResult)) {
-        $takenSeats[] = $row['seat_code'];
+if ($takenQuery) {
+    while ($row = mysqli_fetch_assoc($takenQuery)) {
+        $takenSeats[] = $row['group_name'] . $row['seat_number'];
     }
 }
 
 /*
 |--------------------------------------------------------------------------
-| HANDLE SUBMIT FIRST
+| HANDLE SEAT SUBMIT
 |--------------------------------------------------------------------------
 */
-
 if (isset($_POST['next'])) {
+    $selectedSeat = trim($_POST['seat_code'] ?? '');
+    $groupId = (int)($_POST['group_id'] ?? 0);
 
-    $selectedSeat = trim($_POST['seat'] ?? '');
-    $selectedRow = trim($_POST['row_name'] ?? '');
-
-    if ($selectedSeat === '' || $selectedRow === '') {
+    if ($selectedSeat === '' || $groupId <= 0) {
         $_SESSION['seat_error'] = "Please select a seat.";
         header("Location: seat.php");
         exit();
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | PARSE SEAT CODE
-    |--------------------------------------------------------------------------
-    | Example: GENAD25 -> row = GENAD, seat_number = 25
-    |--------------------------------------------------------------------------
-    */
+    $groupCheck = mysqli_query(
+        $conn,
+        "SELECT *
+         FROM event_seat_groups
+         WHERE id = '$groupId'
+         AND event_id = '$eventId'
+         LIMIT 1"
+    );
 
-    if (!preg_match('/^(.+?)(\d+)$/', $selectedSeat, $matches)) {
-        $_SESSION['seat_error'] = "Invalid seat selection.";
+    if (!$groupCheck || mysqli_num_rows($groupCheck) == 0) {
+        $_SESSION['seat_error'] = "Seat group not found.";
         header("Location: seat.php");
         exit();
     }
 
-    $parsedRow = $matches[1];
-    $seatNumber = (int)$matches[2];
+    $groupData = mysqli_fetch_assoc($groupCheck);
+    $groupName = $groupData['group_name'];
 
-    if (strtoupper($parsedRow) !== strtoupper($selectedRow)) {
-        $_SESSION['seat_error'] = "Selected seat does not match the row.";
+    if (strpos($selectedSeat, $groupName) !== 0) {
+        $_SESSION['seat_error'] = "Selected seat does not match the group.";
         header("Location: seat.php");
         exit();
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | VERIFY SEAT EXISTS
-    |--------------------------------------------------------------------------
-    */
+    $seatNumber = (int)preg_replace('/^\D+/', '', $selectedSeat);
 
-    $seatCheckSql = "
-        SELECT *
-        FROM venue_seats
-        WHERE venue_id='$venueId'
-        AND row_name='$selectedRow'
-        AND seat_number='$seatNumber'
-        LIMIT 1
-    ";
-    $seatCheckResult = mysqli_query($conn, $seatCheckSql);
+    $seatCheck = mysqli_query(
+        $conn,
+        "SELECT *
+         FROM event_group_seats
+         WHERE group_id = '$groupId'
+         AND seat_number = '$seatNumber'
+         LIMIT 1"
+    );
 
-    if (!$seatCheckResult || mysqli_num_rows($seatCheckResult) == 0) {
+    if (!$seatCheck || mysqli_num_rows($seatCheck) == 0) {
         $_SESSION['seat_error'] = "Seat not found.";
         header("Location: seat.php");
         exit();
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | CHECK IF SEAT IS TAKEN
-    |--------------------------------------------------------------------------
-    */
+    $seatRow = mysqli_fetch_assoc($seatCheck);
 
-    $checkSql = "
-        SELECT *
-        FROM bookings
-        WHERE event_id='$eventId'
-        AND seat_code='$selectedSeat'
-        AND booking_status IN ('reserved', 'paid')
-    ";
-    $checkResult = mysqli_query($conn, $checkSql);
-
-    if (!$checkResult) {
-        die("Seat check failed: " . mysqli_error($conn));
-    }
-
-    if (mysqli_num_rows($checkResult) > 0) {
+    if ($seatRow['status'] === 'booked') {
         $_SESSION['seat_error'] = "Seat already taken.";
         header("Location: seat.php");
         exit();
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | GET ROW PRICE
-    |--------------------------------------------------------------------------
-    */
+    if ($seatRow['status'] === 'unavailable') {
+        $_SESSION['seat_error'] = "Seat is unavailable.";
+        header("Location: seat.php");
+        exit();
+    }
 
-    $rowPrice = isset($rowPriceMap[$selectedRow]) ? (float)$rowPriceMap[$selectedRow] : 0.00;
-
+    $groupPrice = (float)$groupData['group_price'];
     $ticketPrice = (float)$eventData['ticket_price'];
     $serviceFee = (float)$eventData['service_fee'];
-    $selectedTotal = $ticketPrice + $serviceFee + $rowPrice;
+    $total = $ticketPrice + $serviceFee + $groupPrice;
 
     $_SESSION['selected_seat'] = $selectedSeat;
-    $_SESSION['selected_row'] = $selectedRow;
-    $_SESSION['selected_row_price'] = $rowPrice;
+    $_SESSION['selected_group'] = $groupName;
+    $_SESSION['selected_group_price'] = $groupPrice;
     $_SESSION['service_fee'] = $serviceFee;
-    $_SESSION['selected_total'] = $selectedTotal;
+    $_SESSION['selected_total'] = $total;
 
     header("Location: payment.php");
     exit();
@@ -233,40 +168,31 @@ if (isset($_POST['next'])) {
 | SESSION ERROR
 |--------------------------------------------------------------------------
 */
-
 $seatError = $_SESSION['seat_error'] ?? '';
 unset($_SESSION['seat_error']);
 
-/*
-|--------------------------------------------------------------------------
-| INITIAL VALUES
-|--------------------------------------------------------------------------
-*/
-
 $baseTicketPrice = (float)$eventData['ticket_price'];
 $serviceFee = (float)$eventData['service_fee'];
-$initialRowPrice = 0.00;
 $initialTotal = $baseTicketPrice + $serviceFee;
-
 ?>
 
 <!DOCTYPE html>
 <html>
 <head>
-
     <title>Select Seat</title>
-
-    <link rel="stylesheet" href="general_style.css">
-
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 
     <style>
         body{
             font-family: Arial;
+            background: #f5f5f5;
+            margin: 0;
+            padding: 20px;
         }
 
         .main_cont{
-            padding: 20px;
+            max-width: 1200px;
+            margin: auto;
         }
 
         .event-info{
@@ -280,6 +206,16 @@ $initialTotal = $baseTicketPrice + $serviceFee;
 
         .legend{
             margin-bottom: 20px;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .legend-item{
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
 
         .legend-box{
@@ -287,21 +223,13 @@ $initialTotal = $baseTicketPrice + $serviceFee;
             width: 20px;
             height: 20px;
             border-radius: 4px;
-            margin-right: 5px;
             vertical-align: middle;
         }
 
-        .available-box{
-            background: #ccc;
-        }
-
-        .selected-box{
-            background: green;
-        }
-
-        .taken-box{
-            background: red;
-        }
+        .available-box{ background: #d1d5db; }
+        .selected-box{ background: #16a34a; }
+        .taken-box{ background: #dc2626; }
+        .unavailable-box{ background: #facc15; }
 
         .screen{
             max-width: 100%;
@@ -313,50 +241,75 @@ $initialTotal = $baseTicketPrice + $serviceFee;
             font-weight: bold;
         }
 
-        .row{
-            margin-bottom: 12px;
+        .group{
+            margin-bottom: 18px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            background: #fff;
         }
 
-        .row-head{
+        .group-head{
             display: flex;
             align-items: center;
             gap: 10px;
-            margin-bottom: 6px;
+            margin-bottom: 10px;
             flex-wrap: wrap;
         }
 
-        .row-label{
-            display: inline-block;
-            font-weight: bold;
+        .group-color{
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            border: 1px solid rgba(0,0,0,.2);
         }
 
-        .row-price{
-            display: inline-block;
-            font-size: 14px;
-            color: #444;
+        .seat-wrap{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
         }
 
         .seat{
-            display: inline-block;
-            width: 50px;
-            padding: 15px 0;
-            margin: 5px;
-            border-radius: 5px;
-            text-align: center;
+            width: 54px;
+            height: 54px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             cursor: pointer;
             user-select: none;
-            background: #ccc;
+            color: #111;
+            border: 1px solid rgba(0,0,0,.12);
+            font-weight: bold;
+            box-sizing: border-box;
+            background: var(--seat-color, #d1d5db);
+        }
+
+        .seat.available{
+            background: var(--seat-color, #d1d5db) !important;
+            color: #111;
         }
 
         .seat.selected{
-            background: green;
-            color: white;
+            background: #16a34a !important;
+            color: #fff !important;
+            border-color: #15803d;
+            box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18);
         }
 
         .seat.taken{
-            background: red;
-            color: white;
+            background: #dc2626 !important;
+            color: #fff !important;
             cursor: not-allowed;
+            border-color: #b91c1c;
+        }
+
+        .seat.unavailable{
+            background: #facc15 !important;
+            color: #111 !important;
+            cursor: not-allowed;
+            border-color: #eab308;
         }
 
         button{
@@ -376,6 +329,12 @@ $initialTotal = $baseTicketPrice + $serviceFee;
             color: #a40000;
             border-radius: 6px;
         }
+
+        .group-note{
+            margin-left: auto;
+            font-size: 13px;
+            color: #666;
+        }
     </style>
 
     <script>
@@ -386,44 +345,37 @@ $initialTotal = $baseTicketPrice + $serviceFee;
             return "₱" + Number(value).toFixed(2);
         }
 
-        function updateSummary(rowPrice, seatCode, rowName) {
-            const total = baseTicketPrice + serviceFee + rowPrice;
+        function updateSummary(groupPrice, seatCode, groupName) {
+            const total = baseTicketPrice + serviceFee + groupPrice;
 
             document.getElementById("selectedSeatDisplay").textContent = seatCode || "-";
-            document.getElementById("selectedRowDisplay").textContent = rowName || "-";
-            document.getElementById("rowPriceDisplay").textContent = formatMoney(rowPrice);
+            document.getElementById("selectedGroupDisplay").textContent = groupName || "-";
+            document.getElementById("groupPriceDisplay").textContent = formatMoney(groupPrice);
             document.getElementById("totalDisplay").textContent = formatMoney(total);
         }
 
         function selectSeat(el) {
-
             const seatCode = el.dataset.seatCode;
-            const rowName = el.dataset.rowName;
-            const rowPrice = parseFloat(el.dataset.rowPrice || "0");
+            const groupName = el.dataset.groupName;
+            const groupPrice = parseFloat(el.dataset.groupPrice || "0");
+            const groupId = el.dataset.groupId;
 
             document.getElementById("seatInput").value = seatCode;
-            document.getElementById("rowInput").value = rowName;
-            document.getElementById("rowPriceInput").value = rowPrice.toFixed(2);
+            document.getElementById("groupIdInput").value = groupId;
 
-            const seats = document.getElementsByClassName("seat");
-            for (let seat of seats) {
-                if (!seat.classList.contains("taken")) {
+            document.querySelectorAll(".seat").forEach(seat => {
+                if (!seat.classList.contains("taken") && !seat.classList.contains("unavailable")) {
                     seat.classList.remove("selected");
                 }
-            }
+            });
 
             el.classList.add("selected");
-
-            updateSummary(rowPrice, seatCode, rowName);
-
+            updateSummary(groupPrice, seatCode, groupName);
             document.getElementById("nextBtn").disabled = false;
         }
     </script>
-
 </head>
-
 <body>
-
 <div class="main_cont">
 
     <h2>Choose Your Seat</h2>
@@ -433,123 +385,103 @@ $initialTotal = $baseTicketPrice + $serviceFee;
     <?php } ?>
 
     <div class="event-info">
-
         <b>Event Type:</b> <?php echo htmlspecialchars($eventData['event_type']); ?><br>
-
         <b>Event:</b> <?php echo htmlspecialchars($eventData['event_name']); ?><br>
+        <b>Venue:</b> <?php echo htmlspecialchars($eventData['venue_name']); ?><br>
+        <b>Date:</b> <?php echo htmlspecialchars($eventData['event_date']); ?><br>
 
-        <b>Venue:</b> <?php echo htmlspecialchars($venueData['venue_name']); ?><br>
-
-        <b>Date:</b> <?php echo htmlspecialchars($eventData['date']); ?><br>
-
-        <div class="summary-line">
-            <b>Ticket Price:</b> ₱<?php echo number_format($baseTicketPrice, 2); ?>
-        </div>
-
-        <div class="summary-line">
-            <b>Service Fee:</b> ₱<?php echo number_format($serviceFee, 2); ?>
-        </div>
-
-        <div class="summary-line">
-            <b>Selected Row:</b> <span id="selectedRowDisplay">-</span>
-        </div>
-
-        <div class="summary-line">
-            <b>Row Price:</b> <span id="rowPriceDisplay">₱0.00</span>
-        </div>
-
-        <div class="summary-line">
-            <b>Selected Seat:</b> <span id="selectedSeatDisplay">-</span>
-        </div>
-
-        <div class="summary-line">
-            <b>Total:</b> <span id="totalDisplay">₱<?php echo number_format($initialTotal, 2); ?></span>
-        </div>
-
+        <div class="summary-line"><b>Ticket Price:</b> ₱<?php echo number_format($baseTicketPrice, 2); ?></div>
+        <div class="summary-line"><b>Service Fee:</b> ₱<?php echo number_format($serviceFee, 2); ?></div>
+        <div class="summary-line"><b>Selected Group:</b> <span id="selectedGroupDisplay">-</span></div>
+        <div class="summary-line"><b>Group Price:</b> <span id="groupPriceDisplay">₱0.00</span></div>
+        <div class="summary-line"><b>Selected Seat:</b> <span id="selectedSeatDisplay">-</span></div>
+        <div class="summary-line"><b>Total:</b> <span id="totalDisplay">₱<?php echo number_format($initialTotal, 2); ?></span></div>
     </div>
 
     <div class="legend">
-        <div class="legend-box available-box"></div> Available
-        &nbsp;&nbsp;
-        <div class="legend-box selected-box"></div> Selected
-        &nbsp;&nbsp;
-        <div class="legend-box taken-box"></div> Taken
+        <div class="legend-item"><div class="legend-box available-box"></div> Available</div>
+        <div class="legend-item"><div class="legend-box selected-box"></div> Selected</div>
+        <div class="legend-item"><div class="legend-box taken-box"></div> Taken</div>
+        <div class="legend-item"><div class="legend-box unavailable-box"></div> Not Available</div>
     </div>
 
     <div class="screen">SCREEN</div>
 
-    <?php
-    $currentRow = "";
-    $rowPriceForCurrentRow = 0.00;
+    <?php while ($group = mysqli_fetch_assoc($groupsQuery)) { ?>
+        <?php
+            $groupId = (int)$group['id'];
+            $groupName = $group['group_name'];
+            $groupColor = $group['group_color'];
+            $seatCount = (int)$group['seat_count'];
+            $groupPrice = (float)$group['group_price'];
 
-    while ($seat = mysqli_fetch_assoc($seatResult)) {
+            $seatStatusMap = [];
+            $seatQuery = mysqli_query(
+                $conn,
+                "SELECT seat_number, status
+                 FROM event_group_seats
+                 WHERE group_id='$groupId'
+                 ORDER BY seat_number ASC"
+            );
 
-        $rowName = $seat['row_name'];
-        $seatNumber = $seat['seat_number'];
-        $seatCode = $rowName . $seatNumber;
-        $isTaken = in_array($seatCode, $takenSeats);
-
-        if ($currentRow !== $rowName) {
-
-            if ($currentRow !== "") {
-                echo "</div>";
+            if ($seatQuery) {
+                while ($s = mysqli_fetch_assoc($seatQuery)) {
+                    $seatStatusMap[(int)$s['seat_number']] = $s['status'];
+                }
             }
+        ?>
 
-            $rowPriceForCurrentRow = isset($rowPriceMap[$rowName]) ? (float)$rowPriceMap[$rowName] : 0.00;
+        <div class="group">
+            <div class="group-head">
+                <div class="group-color" style="background: <?php echo htmlspecialchars($groupColor); ?>;"></div>
+                <b><?php echo htmlspecialchars($groupName); ?></b>
+                <span>Group Price: ₱<?php echo number_format($groupPrice, 2); ?></span>
+                <span class="group-note">Color identifies the group only. Status colors override it.</span>
+            </div>
 
-            echo "<div class='row'>";
-            echo "<div class='row-head'>";
-            echo "<span class='row-label'>Row " . htmlspecialchars($rowName) . "</span>";
-            echo "<span class='row-price'>- Row Price: ₱" . number_format($rowPriceForCurrentRow, 2) . "</span>";
-            echo "</div>";
+            <div class="seat-wrap">
+                <?php for ($i = 1; $i <= $seatCount; $i++) { ?>
+                    <?php
+                        $status = $seatStatusMap[$i] ?? 'available';
+                        $seatCode = $groupName . $i;
 
-            $currentRow = $rowName;
-        }
-    ?>
-
-        <div
-            id="<?php echo htmlspecialchars($seatCode); ?>"
-            class="seat <?php echo $isTaken ? 'taken' : ''; ?>"
-            data-seat-code="<?php echo htmlspecialchars($seatCode); ?>"
-            data-row-name="<?php echo htmlspecialchars($rowName); ?>"
-            data-row-price="<?php echo htmlspecialchars($rowPriceForCurrentRow); ?>"
-            <?php if (!$isTaken) { ?>
-                onclick="selectSeat(this)"
-            <?php } ?>
-        >
-            <?php echo htmlspecialchars($seatNumber); ?>
+                        $seatClass = 'seat';
+                        if ($status === 'booked') {
+                            $seatClass .= ' taken';
+                        } elseif ($status === 'unavailable') {
+                            $seatClass .= ' unavailable';
+                        } else {
+                            $seatClass .= ' available';
+                        }
+                    ?>
+                    <div
+                        class="<?php echo $seatClass; ?>"
+                        style="--seat-color: <?php echo htmlspecialchars($groupColor); ?>;"
+                        data-seat-code="<?php echo htmlspecialchars($seatCode); ?>"
+                        data-group-name="<?php echo htmlspecialchars($groupName); ?>"
+                        data-group-price="<?php echo htmlspecialchars($groupPrice); ?>"
+                        data-group-id="<?php echo $groupId; ?>"
+                        <?php if ($status === 'available') { ?>onclick="selectSeat(this)"<?php } ?>
+                    >
+                        <?php echo $i; ?>
+                    </div>
+                <?php } ?>
+            </div>
         </div>
-
-    <?php
-    }
-
-    if ($currentRow !== "") {
-        echo "</div>";
-    }
-    ?>
-
-    <br><br>
+    <?php } ?>
 
     <form method="POST">
-        <input type="hidden" name="seat" id="seatInput">
-        <input type="hidden" name="row_name" id="rowInput">
-        <input type="hidden" name="row_price" id="rowPriceInput">
+        <input type="hidden" name="seat_code" id="seatInput">
+        <input type="hidden" name="group_id" id="groupIdInput">
 
-        <button
-            type="submit"
-            name="next"
-            id="nextBtn"
-            disabled
-        >
+        <button type="submit" name="next" id="nextBtn" disabled>
             Proceed to Payment
         </button>
     </form>
-
 </div>
 
 <script>
     updateSummary(0, "", "");
 </script>
-
 </body>
 </html>
