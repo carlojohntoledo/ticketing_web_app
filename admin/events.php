@@ -213,10 +213,6 @@ if ($eventPriceQuery) {
     <title>Events</title>
 
     <style>
-        body{
-            font-family: Arial, sans-serif;
-            padding: 20px;
-        }
 
         input, select {
             padding: 8px;

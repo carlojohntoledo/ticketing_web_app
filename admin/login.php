@@ -13,7 +13,7 @@ if (isset($_POST['login'])) {
 
 	if ($user === $adminUser && $pass === $adminPass) {
 		$_SESSION['admin'] = true;
-		header("Location: dashboard.php");
+		header("Location: admin_dashboard.php");
 		exit();
 	} else {
 		$error = "Invalid credentials";
