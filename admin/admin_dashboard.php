@@ -58,10 +58,15 @@ function buildUrl(array $overrides = []): string
     return $_SERVER['PHP_SELF'] . '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
 }
 
+function lower_text(string $text): string
+{
+    return function_exists('mb_strtolower') ? mb_strtolower($text) : strtolower($text);
+}
+
 function filterSortEvents(array $events, string $search = '', string $type = 'all', string $sort = 'latest'): array
 {
     $search = trim($search);
-    $searchLower = function_exists('mb_strtolower') ? mb_strtolower($search) : strtolower($search);
+    $searchLower = lower_text($search);
 
     $filtered = array_values(array_filter($events, function ($event) use ($searchLower, $type) {
         $eventType = (string)($event['event_type'] ?? '');
@@ -78,7 +83,7 @@ function filterSortEvents(array $events, string $search = '', string $type = 'al
         }
 
         $haystack = trim($eventName . ' ' . $venueName . ' ' . $eventType . ' ' . $eventDate);
-        $haystackLower = function_exists('mb_strtolower') ? mb_strtolower($haystack) : strtolower($haystack);
+        $haystackLower = lower_text($haystack);
 
         return strpos($haystackLower, $searchLower) !== false;
     }));
@@ -103,17 +108,17 @@ function filterSortEvents(array $events, string $search = '', string $type = 'al
             case 'oldest':
                 return $aId <=> $bId;
             case 'name_asc':
-                return strcmp(mb_strtolower($aName), mb_strtolower($bName));
+                return strcmp(lower_text($aName), lower_text($bName));
             case 'name_desc':
-                return strcmp(mb_strtolower($bName), mb_strtolower($aName));
+                return strcmp(lower_text($bName), lower_text($aName));
             case 'date_asc':
                 return strcmp($aDate, $bDate);
             case 'date_desc':
                 return strcmp($bDate, $aDate);
             case 'venue_asc':
-                return strcmp(mb_strtolower($aVenue), mb_strtolower($bVenue));
+                return strcmp(lower_text($aVenue), lower_text($bVenue));
             case 'venue_desc':
-                return strcmp(mb_strtolower($bVenue), mb_strtolower($aVenue));
+                return strcmp(lower_text($bVenue), lower_text($aVenue));
             case 'price_asc':
                 return $aPrice <=> $bPrice;
             case 'price_desc':
@@ -690,6 +695,9 @@ $eventTypes = ['all', 'Concert', 'Sports', 'Theatre', 'Conference', 'Other'];
         }
         .group-seats{
             margin-top:8px;
+            display:flex;
+            flex-wrap:wrap;
+            gap:6px;
         }
         .group-seats .badge{
             min-width:76px;
@@ -761,6 +769,30 @@ $eventTypes = ['all', 'Concert', 'Sports', 'Theatre', 'Conference', 'Other'];
         .control-title{
             margin:12px 0 6px;
             font-weight:bold;
+        }
+        .seat-status-toggles{
+            display:flex;
+            gap:8px;
+            flex-wrap:wrap;
+            align-items:center;
+            margin:10px 0 14px;
+        }
+        .seat-status-toggle{
+            border-radius:999px;
+            border:1px solid #d1d5db;
+            background:#fff;
+            color:#111827;
+            padding:8px 12px;
+            cursor:pointer;
+            font-size:13px;
+        }
+        .seat-status-toggle.active{
+            background:#111827;
+            color:#fff;
+            border-color:#111827;
+        }
+        .seat-pill.hidden-seat{
+            display:none !important;
         }
         @media (max-width: 980px){
             .grid,.group-row{
@@ -961,6 +993,13 @@ $eventTypes = ['all', 'Concert', 'Sports', 'Theatre', 'Conference', 'Other'];
         <h3>Seats Overview of Each Added Event</h3>
         <p class="muted small">Green = available, Yellow = not available, Red = booked. Only 2 events are shown per page.</p>
 
+        <div class="seat-status-toggles">
+            <button type="button" class="seat-status-toggle active" data-seat-status="available">Hide Available</button>
+            <button type="button" class="seat-status-toggle active" data-seat-status="unavailable">Hide Not Available</button>
+            <button type="button" class="seat-status-toggle active" data-seat-status="booked">Hide Booked</button>
+            <button type="button" class="seat-status-toggle" data-seat-status="reset">Show All</button>
+        </div>
+
         <form method="GET" class="toolbar">
             <input type="text" name="overview_q" value="<?php echo h($overviewSearch); ?>" placeholder="Search event name, venue, type, or date">
             <input type="hidden" name="overview_type" value="<?php echo h($overviewType); ?>">
@@ -1016,11 +1055,15 @@ $eventTypes = ['all', 'Concert', 'Sports', 'Theatre', 'Conference', 'Other'];
                                 </div>
 
                                 <div class="group-seats">
-                                    <?php foreach ($group['seats'] as $seat) {
-                                        $statusClass = $seat['status'];
-                                        $seatLabel = $group['group_name'] . $seat['seat_number'];
-                                        echo '<span class="badge ' . h($statusClass) . '">' . h($seatLabel) . '</span>';
-                                    } ?>
+                                    <?php foreach ($group['seats'] as $seat) { ?>
+                                        <?php
+                                            $status = $seat['status'] ?: 'available';
+                                            $seatLabel = $group['group_name'] . $seat['seat_number'];
+                                        ?>
+                                        <span class="badge seat-pill <?php echo h($status); ?>" data-seat-status="<?php echo h($status); ?>">
+                                            <?php echo h($seatLabel); ?>
+                                        </span>
+                                    <?php } ?>
                                 </div>
                             </div>
                         <?php } ?>
@@ -1324,6 +1367,96 @@ function removeGroup(btn) {
             window.scrollTo(0, parseInt(y, 10) || 0);
         }
         sessionStorage.removeItem(storageKey);
+    });
+})();
+
+/*
+|--------------------------------------------------------------------------
+| SEAT OVERVIEW TOGGLES
+|--------------------------------------------------------------------------
+*/
+(function () {
+    const storageKey = 'admin_dashboard_seat_visibility';
+    const defaultState = {
+        available: true,
+        unavailable: true,
+        booked: true
+    };
+
+    let state = { ...defaultState };
+
+    function loadState() {
+        try {
+            const raw = localStorage.getItem(storageKey);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') {
+                    state.available = parsed.available !== undefined ? !!parsed.available : true;
+                    state.unavailable = parsed.unavailable !== undefined ? !!parsed.unavailable : true;
+                    state.booked = parsed.booked !== undefined ? !!parsed.booked : true;
+                }
+            }
+        } catch (e) {
+            state = { ...defaultState };
+        }
+    }
+
+    function saveState() {
+        localStorage.setItem(storageKey, JSON.stringify(state));
+    }
+
+    function applyState() {
+        document.querySelectorAll('.seat-pill').forEach(function (el) {
+            const status = el.dataset.seatStatus || 'available';
+            el.classList.toggle('hidden-seat', !state[status]);
+        });
+
+        document.querySelectorAll('.seat-status-toggle').forEach(function (btn) {
+            const status = btn.dataset.seatStatus;
+
+            if (status === 'reset') {
+                btn.classList.toggle('active', state.available && state.unavailable && state.booked);
+                btn.textContent = 'Show All';
+                return;
+            }
+
+            const isVisible = !!state[status];
+            btn.classList.toggle('active', isVisible);
+            btn.textContent = (isVisible ? 'Hide ' : 'Show ') + capitalize(status);
+        });
+    }
+
+    function capitalize(text) {
+        return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+
+    document.addEventListener('click', function (e) {
+        const btn = e.target.closest('.seat-status-toggle');
+        if (!btn) {
+            return;
+        }
+
+        const status = btn.dataset.seatStatus;
+
+        if (status === 'reset') {
+            state.available = true;
+            state.unavailable = true;
+            state.booked = true;
+            saveState();
+            applyState();
+            return;
+        }
+
+        if (status in state) {
+            state[status] = !state[status];
+            saveState();
+            applyState();
+        }
+    });
+
+    window.addEventListener('load', function () {
+        loadState();
+        applyState();
     });
 })();
 
